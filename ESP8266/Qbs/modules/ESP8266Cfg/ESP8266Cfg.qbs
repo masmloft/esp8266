@@ -10,11 +10,11 @@ Module {
     property string flashFreq: "40"
     property string flashSize: "1M"
 
-    property path selfPath: path + "./../../../Libs/"
-    property path python3: selfPath + "/tools/python3/3.7.2-post1/python3"
-    property path elf2bin_py: selfPath + "/tools/elf2bin.py"
-    property path upload_py: selfPath + "/tools/upload.py"
-    property path bootloader: selfPath + "/bootloaders/eboot/eboot.elf"
+    property path rootPath: path + "./../../../Libs/"
+    property path python3: rootPath + "/tools/python3/3.7.2-post1/python3"
+    property path elf2bin_py: rootPath + "/tools/elf2bin.py"
+    property path upload_py: rootPath + "/tools/upload.py"
+    property path bootloader: rootPath + "/bootloaders/eboot/eboot.elf"
 
     //to-do
     //"xtensa-lx106-elf-gcc" -CC -E -P -DVTABLES_IN_FLASH "tools/sdk/ld/eagle.app.v6.common.ld.h" -o "local.eagle.app.v6.common.ld"
