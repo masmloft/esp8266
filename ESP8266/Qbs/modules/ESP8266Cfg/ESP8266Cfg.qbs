@@ -4,6 +4,21 @@ import qbs.TextFile
 
 Module {
     property string serialPort: "COM1"
+    property string serialPortSpeed: "921600"
+
+    property string flashMode: "dout"
+    property string flashFreq: "40"
+    property string flashSize: "1M"
+
+    property path selfPath: path + "./../../../Libs/"
+    property path python3: selfPath + "/tools/python3/3.7.2-post1/python3"
+    property path elf2bin_py: selfPath + "/tools/elf2bin.py"
+    property path upload_py: selfPath + "/tools/upload.py"
+    property path bootloader: selfPath + "/bootloaders/eboot/eboot.elf"
+
+    //to-do
+    //"xtensa-lx106-elf-gcc" -CC -E -P -DVTABLES_IN_FLASH "tools/sdk/ld/eagle.app.v6.common.ld.h" -o "local.eagle.app.v6.common.ld"
+
 
     Depends { name: "cpp" }
 
@@ -108,7 +123,7 @@ Module {
             cmdFile.highlight = "linker";
 
             var cmd = new Command(app, [ input.filePath ]);
-            cmd.description = "***Info: " + output.filePath;
+            cmd.description = "***Info: " + output.fileName;
             cmd.highlight = "linker";
 
             return [cmd, cmdFile];
@@ -117,7 +132,7 @@ Module {
 
     Rule
     {
-        name: "application.bin"
+        name: "elf->bin"
         condition: true
         inputs: ["application.elf"]
         Artifact
@@ -127,17 +142,21 @@ Module {
         }
         prepare:
         {
-            var esptool = project.path + "/ESP8266/Tools/esptool.exe";
-            var eboot = project.path + "/ESP8266/Bootloaders/eboot/eboot.elf";
+            var toolchainPath = product.cpp.toolchainInstallPath;
+
+            var app = product.ESP8266Cfg.python3;
             var args = [
-                        "-eo", eboot,
-                        "-bo",output.filePath,
-                        "-bm","dio","-bf","40","-bz","4M","-bs",".text","-bp","4096","-ec",
-                        "-eo",input.filePath,
-                        "-bs",".irom0.text","-bs",".text","-bs",".data","-bs",".rodata","-bc","-ec"
+                        product.ESP8266Cfg.elf2bin_py,
+                        "--eboot", product.ESP8266Cfg.bootloader,
+                        "--app", input.filePath,
+                        "--flash_mode", product.ESP8266Cfg.flashMode,
+                        "--flash_freq", product.ESP8266Cfg.flashFreq,
+                        "--flash_size", product.ESP8266Cfg.flashSize,
+                        "--path", toolchainPath,
+                        "--out", output.filePath
                     ];
-            var cmd = new Command(esptool, args);
-            cmd.description = "***Generate: " + output.filePath;
+            var cmd = new Command(app, args);
+            cmd.description = "***Generate: " + output.fileName;
             cmd.highlight = "linker";
             return [cmd];
         }
@@ -158,15 +177,19 @@ Module {
         prepare:
         {
             var cmd = new JavaScriptCommand();
-            cmd.description = "***Generate: " + output.filePath;
+            cmd.description = "***Generate: " + output.fileName;
             cmd.sourceCode = function() {
                 var ofile = new TextFile(output.filePath, TextFile.WriteOnly);
-                ofile.write(project.path + "/ESP8266/Tools/esptool.exe ")
-                ofile.write(" -cd nodemcu");
-                ofile.write(" -cb 115200");
-                ofile.write(" -cp " + product.ESP8266BuildConfig.serialPort);
-                ofile.write(" -ca 0x00000");
-                ofile.write(" -cf " + inputs["application.bin"][0].filePath);
+
+                ofile.write(product.ESP8266Cfg.python3);
+                ofile.write(" " + product.ESP8266Cfg.upload_py);
+                ofile.write(" --chip esp8266");
+                ofile.write(" --port " + product.ESP8266Cfg.serialPort);
+                ofile.write(" --baud " + product.ESP8266Cfg.serialPortSpeed);
+                ofile.write(" --before default_reset");
+                ofile.write(" --after hard_reset write_flash");
+                ofile.write(" 0x0 " + inputs["application.bin"][0].filePath);
+
                 ofile.close();
             }
             return [cmd];

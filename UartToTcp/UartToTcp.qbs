@@ -1,13 +1,9 @@
 import qbs.FileInfo
 
 CppApplication {
-    //type: ["application", "application.info"]
-
-
-    Depends { name: "ESP8266Core" }
     Depends { name: "ESP8266WiFi" }
 
-    ESP8266Cfg.serialPort: "COM2"
+    ESP8266Cfg.serialPort: "COM4"
 
     Group {
         name: "Files to install"

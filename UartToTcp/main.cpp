@@ -1,162 +1,177 @@
 #include <ESP8266WiFi.h>
-#include <WiFiUdp.h>
-#include <Esp.h>
-#include <HardwareSerial.h>
-#include <osapi.h>
 
-extern "C" {
-#include "user_interface.h"
-}
+#include <algorithm> // std::min
 
-#include "Mic.h"
-#include "AudioInput.h"
+#define SERIAL_LOOPBACK 0
 
-#define LED_PIN (2)
-#define TIMER_DELAY (60 * 80)
+#define BAUD_SERIAL 115200
+#define BAUD_LOGGER 115200
+#define RXBUFFERSIZE 1024
 
+////////////////////////////////////////////////////////////
 
-//static os_timer_t sleepTimer;
+#if SERIAL_LOOPBACK
+#undef BAUD_SERIAL
+#define BAUD_SERIAL 3000000
+#include <esp8266_peri.h>
+#endif
 
-WiFiUDP udp;
-PcmBuf pcmBuf;
-Mic mic;
+#define logger (&Serial)
 
-void timerEvent()
+#define STACK_PROTECTOR  512 // bytes
+
+//how many clients should be able to telnet to this ESP8266
+#define MAX_SRV_CLIENTS 2
+
+const int port = 23;
+
+WiFiServer server(port);
+WiFiClient serverClients[MAX_SRV_CLIENTS];
+
+void setup()
 {
-	ets_intr_lock( );
-	timer0_write(ESP.getCycleCount() + TIMER_DELAY);
-	uint16_t adc_addr[1];
-	system_adc_read_fast(adc_addr, 1, 8);
-	pcmBuf.write(adc_addr[0]);
-	ets_intr_unlock();
-}
+	Serial.begin(BAUD_SERIAL);
+	Serial.setRxBufferSize(RXBUFFERSIZE);
 
-void sleepTimerEvent(void* arg)
-{
-	uint8_t curClientCount = WiFi.softAPgetStationNum();
-	if(curClientCount == 0)
+	logger->begin(BAUD_LOGGER);
+
+	logger->println(ESP.getFullVersion());
+	logger->printf("Serial baud: %d (8n1: %d KB/s)\n", BAUD_SERIAL, BAUD_SERIAL * 8 / 10 / 1024);
+	logger->printf("Serial receive buffer size: %d bytes\n", RXBUFFERSIZE);
+
+#if SERIAL_LOOPBACK
+	USC0(0) |= (1 << UCLBE); // incomplete HardwareSerial API
+	logger->println("Serial Internal Loopback enabled");
+#endif
+
+	WiFi.mode(WIFI_STA);
+	WiFi.begin("Prog", "skynetltd");
+	while (WiFi.status() != WL_CONNECTED)
 	{
-		Serial.println("Sleep");
-		ESP.deepSleep(5e6);
+		logger->print('.');
+		delay(500);
 	}
+	logger->println();
+	logger->print("connected, address=");
+	logger->println(WiFi.localIP());
+
+	//start server
+	server.begin();
+	server.setNoDelay(true);
+
+	logger->print("Ready! Use 'telnet ");
+	logger->print(WiFi.localIP());
+	logger->printf(" %d' to connect\n", port);
 }
 
-void setup(void)
+void loop()
 {
-	pinMode(LED_PIN, OUTPUT);
-	digitalWrite(LED_PIN, LOW);
-	delay(10);
-
-	Serial.begin(115200);
-	delay(10);
-
-	mic.loadCfg();
-
-	WiFi.persistent(false);
-
-//	wifi_set_opmode(WIFI_OFF);
-//	WiFi.mode(WIFI_OFF);
-
-	bool wifi_ap = true;
-	//bool wifi_ap = false;
-
-	if(wifi_ap == true)
+	//check if there are any new clients
+	if (server.hasClient())
 	{
-//		WiFi.setSleepMode(WIFI_MODEM_SLEEP);
-		WiFi.setPhyMode(WIFI_PHY_MODE_11B);
-		Serial.print("Setting soft-AP ... ");
-		boolean result = WiFi.softAP("MW", "wsadwsad", 1, 1, 3);
-		if(result == true)
-			Serial.println("Ready");
-		else
-			Serial.println("Failed!");
-	}
-	else
-	{
-		//String wc_ssid = "QW_SML_WLAN";
-		//String wc_password = "WirelessSml";
-		//IPAddress wc_ip(192,168,1,35);
-
-		//String wc_ssid = "Prog";
-		//String wc_ssid = "sn-600";
-		//String wc_password = "skynetltd";
-		//IPAddress wc_ip(192,168,9,35);
-
-		IPAddress wc_gateway(0,0,0,0);
-		IPAddress wc_subnet(255,255,255,0);
-		String wc_ssid = "QW_SML_WLAN";
-		String wc_password = "WirelessSml";
-
-		WiFi.begin(wc_ssid.c_str(), wc_password.c_str());
-//		WiFi.config(wc_ip, wc_gateway, wc_subnet);
-		while (WiFi.status() != WL_CONNECTED)
+		//find free/disconnected spot
+		int i;
+		for (i = 0; i < MAX_SRV_CLIENTS; i++)
 		{
-			delay(1000);
-			Serial.print(".");
+			if (!serverClients[i])
+			{ // equivalent to !serverClients[i].connected()
+				serverClients[i] = server.available();
+				logger->print("New client: index ");
+				logger->print(i);
+				break;
+			}
 		}
 
-		Serial.println("");
-		Serial.print("Connected to ");
-		Serial.println(wc_ssid.c_str());
-		Serial.print("IP address: ");
-		Serial.println(WiFi.localIP());
+		//no free/disconnected spot so reject
+		if (i == MAX_SRV_CLIENTS)
+		{
+			server.available().println("busy");
+			// hints: server.available() is a WiFiClient with short-term scope
+			// when out of scope, a WiFiClient will
+			// - flush() - all data will be sent
+			// - stop() - automatically too
+			logger->printf("server is busy with %d active connections\n", MAX_SRV_CLIENTS);
+		}
 	}
 
-	delay(100);
-
-	udp.begin(mic.UDP_LOCALPORT);
-	delay(100);
-
-//	timer1_isr_init();
-//	timer1_enable(3, 0, 1);
-//	//  timer1_write(268430 / 1000);
-//	//  timer1_write(39);
-//	timer1_write(39 / 2);
-//	timer1_attachInterrupt(timerEvent);
-
+	//check TCP clients for data
+#if 1
+	// Incredibly, this code is faster than the bufferred one below - #4620 is needed
+	// loopback/3000000baud average 348KB/s
+	for (int i = 0; i < MAX_SRV_CLIENTS; i++)
 	{
-		noInterrupts();
-		timer0_isr_init();
-		timer0_attachInterrupt(timerEvent);
-		timer0_write(ESP.getCycleCount() + TIMER_DELAY);
-		interrupts();
+		while (serverClients[i].available() && Serial.availableForWrite() > 0)
+		{
+			// working char by char is not very efficient
+			Serial.write(serverClients[i].read());
+		}
+	}
+#else
+	// loopback/3000000baud average: 312KB/s
+	for (int i = 0; i < MAX_SRV_CLIENTS; i++)
+	{
+		while (serverClients[i].available() && Serial.availableForWrite() > 0)
+		{
+			size_t maxToSerial = std::min(serverClients[i].available(), Serial.availableForWrite());
+			maxToSerial = std::min(maxToSerial, (size_t)STACK_PROTECTOR);
+			uint8_t buf[maxToSerial];
+			size_t tcp_got = serverClients[i].read(buf, maxToSerial);
+			size_t serial_sent = Serial.write(buf, tcp_got);
+			if (serial_sent != maxToSerial) {
+				logger->printf("len mismatch: available:%zd tcp-read:%zd serial-write:%zd\n", maxToSerial, tcp_got, serial_sent);
+			}
+		}
+	}
+#endif
+
+	// determine maximum output size "fair TCP use"
+	// client.availableForWrite() returns 0 when !client.connected()
+	size_t maxToTcp = 0;
+	for (int i = 0; i < MAX_SRV_CLIENTS; i++)
+	{
+		if (serverClients[i])
+		{
+			size_t afw = serverClients[i].availableForWrite();
+			if (afw)
+			{
+				if (!maxToTcp)
+				{
+					maxToTcp = afw;
+				}
+				else
+				{
+					maxToTcp = std::min(maxToTcp, afw);
+				}
+			}
+			else
+			{
+				// warn but ignore congested clients
+				logger->println("one client is congested");
+			}
+		}
 	}
 
-	digitalWrite(LED_PIN, HIGH);
+	//check UART for data
+	size_t len = std::min((size_t)Serial.available(), maxToTcp);
+	len = std::min(len, (size_t)STACK_PROTECTOR);
+	if (len)
+	{
+		uint8_t sbuf[len];
+		size_t serial_got = Serial.readBytes(sbuf, len);
+		// push UART data to all connected telnet clients
+		for (int i = 0; i < MAX_SRV_CLIENTS; i++)
+		{
+			// if client.availableForWrite() was 0 (congested)
+			// and increased since then,
+			// ensure write space is sufficient:
+			if (serverClients[i].availableForWrite() >= serial_got)
+			{
+				size_t tcp_sent = serverClients[i].write(sbuf, serial_got);
+				if (tcp_sent != len)
+				{
+					logger->printf("len mismatch: available:%zd serial-read:%zd tcp-write:%zd\n", len, serial_got, tcp_sent);
+				}
+			}
+		}
+	}
 }
-
-void loop(void)
-{
-//	{
-//		int ba = udp.next();
-//		if((ba > 0))
-//			Serial.println(ba);
-//		if((ba > 0) && (ba < 64))
-//		{
-//			char buf[64];
-//			int br = udp.read(buf, sizeof(buf) - 1);
-//			if((br >= 0) && (br < 64))
-//			{
-//				buf[br] = 0;
-//				mic.parseCmd(udp, buf);
-//			}
-//		}
-//	}
-
-//	if((mic.udpRemoteIp != uint32_t(0)) && (pcmBuf.readAval() > 0))
-//	{
-//		if(mic.ledEnable)
-//			digitalWrite(LED_PIN, LOW);
-
-//		udp.beginPacket(mic.udpRemoteIp, mic.UDP_REMOTEPORT);
-//		pcmBuf.read(udp, &WiFiUDP::write, mic.txPacketCount);
-//		udp.endPacket();
-//		mic.checkStartTimeout();
-//		delay(mic.txPacketDelay);
-
-//		if(mic.ledEnable)
-//			digitalWrite(LED_PIN, HIGH);
-//	}
-
-}
-
